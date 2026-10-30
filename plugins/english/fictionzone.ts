@@ -53,6 +53,9 @@ function pathToSlug(novelPath: string): string {
   if (omniMatch) {
     return `${omniMatch[1]}-${omniMatch[2]}`;
   }
+  if (/^[0-9]{8,}$/.test(clean)) {
+    return `fq-${clean}`;
+  }
   return clean;
 }
 
@@ -186,7 +189,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
   name = 'Fiction Zone';
   icon = 'src/en/fictionzone/icon.png';
   site = 'https://fictionzone.net';
-  version = '1.0.8';
+  version = '1.0.9';
 
   pluginSettings = {
     accountToken: {
@@ -550,6 +553,36 @@ class FictionZonePlugin implements Plugin.PluginBase {
     searchTerm: string,
     pageNo: number,
   ): Promise<Plugin.NovelItem[]> {
+    const cleanTerm = searchTerm.trim();
+
+    // If searching by URL, path, or novel slug/id on page 1
+    if (pageNo === 1) {
+      const isUrlOrId =
+        cleanTerm.includes('fictionzone.net') ||
+        cleanTerm.includes('omniportal') ||
+        cleanTerm.includes('novel/') ||
+        /^[a-zA-Z0-9]+[-_\/][0-9]+$/.test(cleanTerm) ||
+        /^[0-9]{8,}$/.test(cleanTerm);
+
+      if (isUrlOrId) {
+        try {
+          const novelSlug = pathToSlug(cleanTerm);
+          const novel = await this.parseNovel(formatNovelPath(novelSlug));
+          if (novel) {
+            return [
+              {
+                name: novel.name,
+                cover: novel.cover,
+                path: formatNovelPath(novelSlug),
+              },
+            ];
+          }
+        } catch {
+          // If direct novel lookup fails, fall through to catalog browse search
+        }
+      }
+    }
+
     const params = new URLSearchParams({
       search: searchTerm,
       page: pageNo.toString(),
