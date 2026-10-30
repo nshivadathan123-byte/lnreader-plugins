@@ -1,53 +1,144 @@
 import { fetchApi } from '@libs/fetch';
 import { Plugin } from '@/types/plugin';
-import { Filters } from '@libs/filterInputs';
+import { Filters, FilterTypes } from '@libs/filterInputs';
 import { NovelStatus } from '@libs/novelStatus';
+import { defaultCover } from '@libs/defaultCover';
+
+function decodeCover(image?: string): string {
+  if (!image) return defaultCover;
+  if (image.startsWith('http://') || image.startsWith('https://')) {
+    return image;
+  }
+  try {
+    const decoded =
+      typeof atob === 'function'
+        ? atob(image)
+        : typeof Buffer !== 'undefined'
+          ? Buffer.from(image, 'base64').toString('utf-8')
+          : image;
+    if (decoded.startsWith('http:/') || decoded.startsWith('https://')) {
+      return decoded;
+    }
+  } catch {
+    // fallback
+  }
+  return defaultCover;
+}
+
+function parseDate(dateStr?: string): string | undefined {
+  if (!dateStr) return undefined;
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? undefined : d.toISOString();
+}
 
 class FictionZonePlugin implements Plugin.PluginBase {
   id = 'fictionzone';
   name = 'Fiction Zone';
   icon = 'src/en/fictionzone/icon.png';
   site = 'https://fictionzone.net';
-  version = '1.0.2';
-  filters: Filters | undefined = undefined;
+  version = '1.0.3';
+
+  filters = {
+    sort: {
+      label: 'Sort By',
+      value: 'bookmark_count',
+      options: [
+        { label: 'Most Bookmarked', value: 'bookmark_count' },
+        { label: 'Latest', value: 'created_at' },
+        { label: 'Rating', value: 'rating' },
+        { label: 'Views', value: 'views_all' },
+        { label: 'Chapter Count', value: 'chapter_count' },
+      ],
+      type: FilterTypes.Picker,
+    },
+    status: {
+      label: 'Status',
+      value: 'all',
+      options: [
+        { label: 'All', value: 'all' },
+        { label: 'Ongoing', value: '1' },
+        { label: 'Completed', value: '2' },
+      ],
+      type: FilterTypes.Picker,
+    },
+    genres: {
+      label: 'Genres',
+      value: [],
+      options: [
+        { label: 'Fan-Fiction', value: '3' },
+        { label: 'Fantasy', value: '1' },
+        { label: 'Romance', value: '8' },
+        { label: 'Sci-Fi', value: '6' },
+        { label: 'Urban', value: '2' },
+        { label: 'Virtual Reality', value: '7' },
+      ],
+      type: FilterTypes.CheckboxGroup,
+    },
+  } satisfies Filters;
 
   async popularNovels(
     pageNo: number,
     {
       showLatestNovels,
-      // filters,
+      filters,
     }: Plugin.PopularNovelsOptions<typeof this.filters>,
   ): Promise<Plugin.NovelItem[]> {
-    return await this.getPage(
-      `/platform/browse?page=${pageNo}&page_size=20&sort_by=${showLatestNovels ? 'created_at' : 'bookmark_count'}&sort_order=desc&include_genres=true`,
-    );
+    const params = new URLSearchParams({
+      page: pageNo.toString(),
+      page_size: '20',
+      sort_by: showLatestNovels
+        ? 'created_at'
+        : filters?.sort?.value || 'bookmark_count',
+      sort_order: 'desc',
+      include_genres: 'true',
+    });
+
+    if (filters?.status?.value && filters.status.value !== 'all') {
+      params.append('status', filters.status.value);
+    }
+
+    if (filters?.genres?.value && filters.genres.value.length > 0) {
+      filters.genres.value.forEach(g => params.append('genres', g));
+    }
+
+    return await this.getPage(`/platform/browse?${params.toString()}`);
   }
 
-  // TODO: Fix URLs, current URL leads to 404
   async getData<T>(url: string): Promise<Response<T>> {
-    return await fetchApi(this.site + '/api/__api_party/fictionzone', {
+    const res = await fetchApi(this.site + '/api/__api_party/fictionzone', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
       body: JSON.stringify({
-        'path': url,
-        'headers': [
+        path: url,
+        headers: [
           ['content-type', 'application/json'],
           ['x-request-time', new Date().toISOString()],
         ],
-        'method': 'GET',
+        method: 'GET',
       }),
-    }).then(r => r.json());
+    });
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: Failed to fetch data from ${url}`);
+    }
+
+    const data = (await res.json()) as Response<T>;
+    if (!data || !data.data) {
+      throw new Error(data?.message || `Failed to fetch data from ${url}`);
+    }
+    return data;
   }
 
   async getPage(url: string): Promise<Plugin.NovelItem[]> {
     const data = await this.getData<{ novels: NovelItem[] }>(url);
+    const novels = data?.data?.novels || [];
 
-    return data.data.novels.map(n => ({
+    return novels.map(n => ({
       name: n.title,
-      cover: `https://cdn.fictionzone.net/insecure/rs:fill:165:250/${n.image}.webp`,
+      cover: decodeCover(n.image),
       path: `novel/${n.slug}`,
     }));
   }
@@ -59,91 +150,121 @@ class FictionZonePlugin implements Plugin.PluginBase {
     const data = await this.getData<{ chapters: ChapterItem[] }>(
       '/platform/chapter-lists?novel_id=' + id,
     );
+    const chapters = data?.data?.chapters || [];
 
-    return data.data.chapters.map(n => ({
-      name: n.title,
-      number: n.chapter_number,
-      date: n.published_date
-        ? new Date(n.published_date).toISOString()
-        : undefined,
+    return chapters.map((n, idx) => ({
+      name: n.title || `Chapter ${n.chapter_number ?? idx + 1}`,
+      number: n.chapter_number ?? idx + 1,
+      date: parseDate(n.published_date),
       path: `${novelPath}/${n.chapter_id}|/platform/chapter-content?novel_id=${id}&chapter_id=${n.chapter_id}`,
     }));
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    const novelSlug = novelPath.replace('novel/', '');
+    const novelSlug = novelPath.replace(/^\/?novel\//, '');
     const data = await this.getData<NovelDetails>(
       `/platform/novel-details?slug=${novelSlug}`,
     );
+    const novel = data.data;
 
     return {
       path: novelPath,
-      name: data.data.title,
-      cover: `https://cdn.fictionzone.net/insecure/rs:fill:165:250/${data.data.image}.webp`,
+      name: novel.title,
+      cover: decodeCover(novel.image),
       genres: [
-        ...data.data.genres.map(g => g.name),
-        ...data.data.tags.map(g => g.name),
-      ].join(','),
+        ...(novel.genres || []).map(g => g.name),
+        ...(novel.tags || []).map(g => g.name),
+      ]
+        .filter(Boolean)
+        .join(','),
       status:
-        data.data.status == 1
+        novel.status === 1
           ? NovelStatus.Ongoing
-          : data.data.status == 0
+          : novel.status === 2
             ? NovelStatus.Completed
             : NovelStatus.Unknown,
       author:
-        data.data.contributors.filter(c => c.role == 'author')[0]
+        (novel.contributors || []).find(c => c.role === 'author')
           ?.display_name || '',
-      summary: data.data.synopsis,
-      chapters: await this.getChapterPage(data.data.id, novelPath),
+      summary: novel.synopsis || '',
+      chapters: await this.getChapterPage(novel.id, novelPath),
     };
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
-    const data = await this.getData<{ content: string }>(
-      chapterPath.split('|')[1],
+    const apiPath = chapterPath.includes('|')
+      ? chapterPath.split('|')[1]
+      : chapterPath;
+    const data = await this.getData<{ content?: string }>(apiPath);
+    const content = data?.data?.content;
+
+    if (!content) {
+      if (data?.message) {
+        throw new Error(data.message);
+      }
+      throw new Error('Chapter content is empty or locked.');
+    }
+
+    return (
+      '<p>' +
+      content
+        .split(/\r?\n+/)
+        .map(p => p.trim())
+        .filter(Boolean)
+        .join('</p><p>') +
+      '</p>'
     );
-    return '<p>' + data.data.content.split('\n').join('</p><p>') + '</p>';
   }
 
   async searchNovels(
     searchTerm: string,
     pageNo: number,
   ): Promise<Plugin.NovelItem[]> {
-    return await this.getPage(
-      `/platform/browse?search=${encodeURIComponent(searchTerm)}&page=${pageNo}&page_size=20&search_in_synopsis=true&sort_by=bookmark_count&sort_order=desc&include_genres=true`,
-    );
+    const params = new URLSearchParams({
+      search: searchTerm,
+      page: pageNo.toString(),
+      page_size: '20',
+      search_in_synopsis: 'true',
+      sort_by: 'bookmark_count',
+      sort_order: 'desc',
+      include_genres: 'true',
+    });
+    return await this.getPage(`/platform/browse?${params.toString()}`);
   }
 
-  // resolveUrl = (path: string, isNovel?: boolean) =>
-  //   this.site + '/' + path.split('|')[0];
+  resolveUrl = (path: string, isNovel?: boolean) =>
+    this.site + '/' + path.split('|')[0].replace(/^\//, '');
 }
 
 export default new FictionZonePlugin();
 
 type Response<T> = {
+  success?: boolean;
+  message?: string;
   data: T;
 };
 
 type NovelItem = {
   title: string;
-  image: string;
+  image?: string;
   slug: string;
 };
 
 type ChapterItem = {
-  title: string;
-  chapter_number: number;
-  published_date: string;
+  title?: string;
+  chapter_number?: number;
+  published_date?: string;
   chapter_id: string;
 };
 
 type NovelDetails = {
   id: string;
   title: string;
-  image: string;
-  genres: { name: string }[];
-  tags: { name: string }[];
+  image?: string;
+  genres?: { name: string }[];
+  tags?: { name: string }[];
   status: number;
-  contributors: { role: string; display_name: string }[];
-  synopsis: string;
+  contributors?: { role: string; display_name: string }[];
+  synopsis?: string;
 };
+
