@@ -55,12 +55,16 @@ function pathToSlug(novelPath: string): string {
   return clean;
 }
 
+function isOmniportal(slug: string): boolean {
+  return /^([a-zA-Z0-9]+)[-\s]+([0-9]+)$/.test(slug.trim());
+}
+
 class FictionZonePlugin implements Plugin.PluginBase {
   id = 'fictionzone';
   name = 'Fiction Zone';
   icon = 'src/en/fictionzone/icon.png';
   site = 'https://fictionzone.net';
-  version = '1.0.5';
+  version = '1.0.6';
 
   filters = {
     sort: {
@@ -194,10 +198,58 @@ class FictionZonePlugin implements Plugin.PluginBase {
       `/platform/novel-details?slug=${novelSlug}`,
     );
     const novel = data.data;
-    const canonicalPath = formatNovelPath(novelSlug);
+
+    let chapters: Plugin.ChapterItem[] = [];
+    const isOmni = isOmniportal(novelSlug);
+
+    if (!isOmni) {
+      chapters = await this.getChapterPage(novel.id, novelPath);
+    } else {
+      // For Omniportal novels, try fetching from the omniportal chapters endpoint first
+      const omniMatch = novelSlug.match(/^([a-zA-Z0-9]+)[-_]([0-9]+)$/);
+      if (omniMatch) {
+        try {
+          const chData = await this.getData<{ chapters: ChapterItem[] }>(
+            `/omniportal/novels/chapters?source_id=${omniMatch[1]}&source_key=${omniMatch[2]}&translate=en&engine=google-trans`,
+          );
+          if (chData?.data?.chapters?.length) {
+            chapters = chData.data.chapters.map((n, idx) => ({
+              name: n.title || `Chapter ${n.chapter_number ?? idx + 1}`,
+              number: n.chapter_number ?? idx + 1,
+              date: parseDate(n.published_date),
+              path: `${novelPath}/${n.chapter_id}|/omniportal/chapters/content?source_id=${omniMatch[1]}&source_key=${omniMatch[2]}&chapter_id=${n.chapter_id}&translate=en&engine=google-trans`,
+            }));
+          }
+        } catch {
+          // Fall through
+        }
+      }
+
+      if (!chapters.length) {
+        chapters = await this.getChapterPage(novel.id, novelPath);
+      }
+
+      // If chapter-lists returned 0 chapters (Omniportal external sources require auth),
+      // generate chapters from total_chapters so LNReader can successfully load and register the novel
+      if (!chapters.length) {
+        const total =
+          novel.total_chapters && novel.total_chapters > 0
+            ? novel.total_chapters
+            : 1;
+        const sourceId = omniMatch ? omniMatch[1] : '';
+        const sourceKey = omniMatch ? omniMatch[2] : '';
+        for (let i = 1; i <= total; i++) {
+          chapters.push({
+            name: `Chapter ${i}`,
+            number: i,
+            path: `${novelPath}/${i}|/omniportal/chapters/content?source_id=${sourceId}&source_key=${sourceKey}&chapter_id=${i}&translate=en&engine=google-trans`,
+          });
+        }
+      }
+    }
 
     return {
-      path: canonicalPath,
+      path: novelPath,
       name: novel.title,
       cover: decodeCover(novel.image),
       genres: [
@@ -216,7 +268,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
         (novel.contributors || []).find(c => c.role === 'author')
           ?.display_name || '',
       summary: novel.synopsis || '',
-      chapters: await this.getChapterPage(novel.id, canonicalPath),
+      chapters,
     };
   }
 
@@ -229,25 +281,34 @@ class FictionZonePlugin implements Plugin.PluginBase {
       apiPath = apiPath.replace(/^(https?:\/\/)?([^\/]+\.)?fictionzone\.net/i, '');
     }
 
-    const data = await this.getData<{ content?: string }>(apiPath);
-    const content = data?.data?.content;
+    try {
+      const data = await this.getData<{ content?: string }>(apiPath);
+      const content = data?.data?.content;
 
-    if (!content) {
-      if (data?.message) {
-        throw new Error(data.message);
+      if (content) {
+        return (
+          '<p>' +
+          content
+            .split(/\r?\n+/)
+            .map(p => p.trim())
+            .filter(Boolean)
+            .join('</p><p>') +
+          '</p>'
+        );
       }
-      throw new Error('Chapter content is empty or locked.');
+    } catch (err: any) {
+      if (apiPath.includes('omniportal')) {
+        return (
+          '<p><strong>Fiction Zone Account Required</strong></p>' +
+          '<p>Omniportal novels are translated from external platforms and Fiction Zone requires signing in to read full chapters.</p>' +
+          '<p>Please open this novel in the built-in LNReader WebView to sign into your Fiction Zone account.</p>' +
+          `<p><small>${err?.message || 'Access Restricted'}</small></p>`
+        );
+      }
+      throw err;
     }
 
-    return (
-      '<p>' +
-      content
-        .split(/\r?\n+/)
-        .map(p => p.trim())
-        .filter(Boolean)
-        .join('</p><p>') +
-      '</p>'
-    );
+    throw new Error('Chapter content is empty or locked.');
   }
 
   async searchNovels(
@@ -306,6 +367,7 @@ type NovelDetails = {
   genres?: { name: string }[];
   tags?: { name: string }[];
   status: number;
+  total_chapters?: number;
   contributors?: { role: string; display_name: string }[];
   synopsis?: string;
 };
