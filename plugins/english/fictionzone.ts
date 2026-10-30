@@ -16,7 +16,7 @@ function decodeCover(image?: string): string {
         : typeof Buffer !== 'undefined'
           ? Buffer.from(image, 'base64').toString('utf-8')
           : image;
-    if (decoded.startsWith('http:/') || decoded.startsWith('https://')) {
+    if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
       return decoded;
     }
   } catch {
@@ -31,12 +31,30 @@ function parseDate(dateStr?: string): string | undefined {
   return isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
+function formatNovelPath(slug: string): string {
+  const clean = slug.trim();
+  const omniMatch = clean.match(/^([a-zA-Z0-9]+)[-\s]+([0-9]+)$/);
+  if (omniMatch) {
+    return `omniportal/${omniMatch[1]}/${omniMatch[2]}`;
+  }
+  return `novel/${clean}`;
+}
+
+function pathToSlug(novelPath: string): string {
+  const clean = novelPath.trim().replace(/^\/?(omniportal|novel)\//, '');
+  const match = clean.match(/^([a-zA-Z0-9]+)[\/\-\s]+([0-9]+)$/);
+  if (match) {
+    return `${match[1]}-${match[2]}`;
+  }
+  return clean;
+}
+
 class FictionZonePlugin implements Plugin.PluginBase {
   id = 'fictionzone';
   name = 'Fiction Zone';
   icon = 'src/en/fictionzone/icon.png';
   site = 'https://fictionzone.net';
-  version = '1.0.3';
+  version = '1.0.4';
 
   filters = {
     sort: {
@@ -139,7 +157,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
     return novels.map(n => ({
       name: n.title,
       cover: decodeCover(n.image),
-      path: `omniportal/${n.slug}`,
+      path: formatNovelPath(n.slug),
     }));
   }
 
@@ -161,7 +179,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    const novelSlug = novelPath.replace(/^\/?(novel|omniportal)\//, '');
+    const novelSlug = pathToSlug(novelPath);
     const data = await this.getData<NovelDetails>(
       `/platform/novel-details?slug=${novelSlug}`,
     );
@@ -232,8 +250,14 @@ class FictionZonePlugin implements Plugin.PluginBase {
     return await this.getPage(`/platform/browse?${params.toString()}`);
   }
 
-  resolveUrl = (path: string, isNovel?: boolean) =>
-    this.site + '/' + path.split('|')[0].replace(/^\//, '');
+  resolveUrl = (path: string, isNovel?: boolean) => {
+    let clean = path.split('|')[0].trim().replace(/^\//, '');
+    clean = clean.replace(
+      /^omniportal\/([a-zA-Z0-9]+)[-\s]+([0-9]+)(.*)$/,
+      'omniportal/$1/$2$3',
+    );
+    return `${this.site}/${clean}`;
+  };
 }
 
 export default new FictionZonePlugin();
@@ -267,4 +291,3 @@ type NovelDetails = {
   contributors?: { role: string; display_name: string }[];
   synopsis?: string;
 };
-
