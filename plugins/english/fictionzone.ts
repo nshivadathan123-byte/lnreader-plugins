@@ -75,6 +75,47 @@ function getAuthToken(): string {
   }
 }
 
+async function getFanqieNovelMeta(bookId: string): Promise<{
+  title: string;
+  summary: string;
+  cover: string;
+  author: string;
+} | null> {
+  try {
+    const res = await fetchApi(`https://fanqienovel.com/page/${bookId}`, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    if (!res.ok) return null;
+    const raw = await res.text();
+    const titleMatch = raw.match(/<title>([^<]+)<\/title>/);
+    let title = titleMatch
+      ? titleMatch[1].replace(/完整版.*$/, '').trim()
+      : `Novel ${bookId}`;
+    title = title.replace(/_.*$/, '').trim();
+
+    const descMatch = raw.match(/"description":"([^"]+)"/);
+    const summary = descMatch
+      ? descMatch[1]
+          .replace(/\\n/g, '\n')
+          .replace(/番茄小说提供.*?精彩小说尽在番茄小说网。/, '')
+          .trim()
+      : '';
+
+    const imgMatch = raw.match(/"images":\["([^"]+)"\]/);
+    const cover = imgMatch ? imgMatch[1].replace(/\\u002F/g, '/') : '';
+
+    const authorMatch = raw.match(/"authorName":"([^"]+)"/);
+    const author = authorMatch ? authorMatch[1].trim() : '';
+
+    return { title, summary, cover, author };
+  } catch {
+    return null;
+  }
+}
+
 async function getFanqieChapters(
   bookId: string,
   novelPath: string,
@@ -145,7 +186,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
   name = 'Fiction Zone';
   icon = 'src/en/fictionzone/icon.png';
   site = 'https://fictionzone.net';
-  version = '1.0.7';
+  version = '1.0.8';
 
   pluginSettings = {
     accountToken: {
@@ -291,22 +332,68 @@ class FictionZonePlugin implements Plugin.PluginBase {
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
     const novelSlug = pathToSlug(novelPath);
-    const data = await this.getData<NovelDetails>(
-      `/platform/novel-details?slug=${novelSlug}`,
-    );
-    const novel = data.data;
-
-    let chapters: Plugin.ChapterItem[] = [];
     const isOmni = isOmniportal(novelSlug);
+    const omniMatch = novelSlug.match(/^([a-zA-Z0-9]+)[-_]([0-9]+)$/);
+    const sourceId = omniMatch ? omniMatch[1].toLowerCase() : '';
+    const sourceKey = omniMatch ? omniMatch[2] : '';
+
+    let novelDetails: Partial<NovelDetails> | null = null;
+
+    // 1. Try Fiction Zone's platform novel-details first
+    try {
+      const data = await this.getData<NovelDetails>(
+        `/platform/novel-details?slug=${novelSlug}`,
+      );
+      if (data?.data) {
+        novelDetails = data.data;
+      }
+    } catch {
+      // Platform details not found (e.g. novel not yet in FictionZone platform database)
+    }
+
+    // 2. If not found in /platform and is an omniportal novel:
+    if (!novelDetails && isOmni && omniMatch) {
+      // Try /omniportal/novels/details (works if user has token or IP has quota)
+      try {
+        const omniData = await this.getData<NovelDetails>(
+          `/omniportal/novels/details?source_id=${sourceId}&source_key=${sourceKey}&translate=en&engine=google-trans`,
+        );
+        if (omniData?.data) {
+          novelDetails = omniData.data;
+        }
+      } catch {
+        // Fall through
+      }
+
+      // If Fanqie (fq) and still no details, fetch metadata directly from Fanqie page
+      if (!novelDetails && sourceId === 'fq') {
+        const fqMeta = await getFanqieNovelMeta(sourceKey);
+        if (fqMeta) {
+          novelDetails = {
+            id: sourceKey,
+            title: fqMeta.title,
+            synopsis: fqMeta.summary,
+            image: fqMeta.cover,
+            status: 1,
+            contributors: fqMeta.author
+              ? [{ role: 'author', display_name: fqMeta.author }]
+              : [],
+          };
+        }
+      }
+    }
+
+    if (!novelDetails) {
+      throw new Error(`Novel not found or unsupported: ${novelPath}`);
+    }
+
+    const novel = novelDetails;
+    let chapters: Plugin.ChapterItem[] = [];
 
     if (!isOmni) {
-      chapters = await this.getChapterPage(novel.id, novelPath);
+      chapters = await this.getChapterPage(novel.id || '', novelPath);
     } else {
-      const omniMatch = novelSlug.match(/^([a-zA-Z0-9]+)[-_]([0-9]+)$/);
       if (omniMatch) {
-        const sourceId = omniMatch[1].toLowerCase();
-        const sourceKey = omniMatch[2];
-
         // 1. If user provided account token, try Fiction Zone's omniportal chapters endpoint
         const token = getAuthToken();
         if (token) {
@@ -353,7 +440,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
       }
 
       // 4. Try platform chapter list fallback
-      if (!chapters.length) {
+      if (!chapters.length && novel.id) {
         chapters = await this.getChapterPage(novel.id, novelPath);
       }
 
@@ -377,7 +464,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
 
     return {
       path: novelPath,
-      name: novel.title,
+      name: novel.title || novelSlug,
       cover: decodeCover(novel.image),
       genres: [
         ...(novel.genres || []).map(g => g.name),
