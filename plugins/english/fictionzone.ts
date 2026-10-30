@@ -3,13 +3,10 @@ import { Plugin } from '@/types/plugin';
 import { Filters, FilterTypes } from '@libs/filterInputs';
 import { NovelStatus } from '@libs/novelStatus';
 import { defaultCover } from '@libs/defaultCover';
-import { storage } from '@libs/storage';
 
 function decodeCover(image?: string): string {
   if (!image) return defaultCover;
-  if (image.startsWith('http://') || image.startsWith('https://')) {
-    return image;
-  }
+  if (image.startsWith('http://') || image.startsWith('https://')) return image;
   try {
     const decoded =
       typeof atob === 'function'
@@ -17,26 +14,24 @@ function decodeCover(image?: string): string {
         : typeof Buffer !== 'undefined'
           ? Buffer.from(image, 'base64').toString('utf-8')
           : image;
-    if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
-      return decoded;
-    }
+    if (decoded.startsWith('http')) return decoded;
   } catch {
-    // fallback
+    // Ignore base64 decoding failure
   }
   return defaultCover;
 }
 
-function parseDate(dateStr?: string): string | undefined {
-  if (!dateStr) return undefined;
+function parseDate(dateStr?: string): string | null {
+  if (!dateStr) return null;
   const d = new Date(dateStr);
-  return isNaN(d.getTime()) ? undefined : d.toISOString();
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 function formatNovelPath(slug: string): string {
-  const clean = slug.trim();
-  const omniMatch = clean.match(/^([a-zA-Z0-9]+)[-\s]+([0-9]+)$/);
+  const clean = slug.trim().replace(/^(omniportal|novel)\//i, '');
+  const omniMatch = clean.match(/^([a-zA-Z0-9]+)[-\/\s]+([0-9]+)$/);
   if (omniMatch) {
-    return `omniportal/${omniMatch[1]}/${omniMatch[2]}`;
+    return `omniportal/${omniMatch[1].toLowerCase()}/${omniMatch[2]}`;
   }
   return `novel/${clean}`;
 }
@@ -44,38 +39,17 @@ function formatNovelPath(slug: string): string {
 function pathToSlug(novelPath: string): string {
   let clean = decodeURIComponent(novelPath.trim());
   clean = clean.replace(/^(https?:\/\/)?([^\/]+\.)?fictionzone\.net\/?/i, '');
-  clean = clean.replace(/^\/+/, '');
-  clean = clean.split('?')[0].split('#')[0];
-  clean = clean.replace(/\/+$/, '');
+  clean = clean.replace(/^\/+/, '').split(/[?#]/)[0].replace(/\/+$/, '');
   clean = clean.replace(/^(omniportal|novel)\//i, '');
 
   const omniMatch = clean.match(/^([a-zA-Z0-9]+)[\/\-\s]+([0-9]+)$/);
   if (omniMatch) {
-    return `${omniMatch[1]}-${omniMatch[2]}`;
+    return `${omniMatch[1].toLowerCase()}-${omniMatch[2]}`;
   }
   if (/^[0-9]{8,}$/.test(clean)) {
     return `fq-${clean}`;
   }
   return clean;
-}
-
-function isOmniportal(slug: string): boolean {
-  return /^([a-zA-Z0-9]+)[-\s]+([0-9]+)$/.test(slug.trim());
-}
-
-function getAuthToken(): string {
-  try {
-    const raw = (storage.get<string>('accountToken') || '').trim();
-    if (!raw) return '';
-    const match = raw.match(/fz_access_token=([^;]+)/);
-    if (match) return match[1].trim();
-    if (raw.toLowerCase().startsWith('bearer ')) {
-      return raw.slice(7).trim();
-    }
-    return raw;
-  } catch {
-    return '';
-  }
 }
 
 async function getFanqieNovelMeta(bookId: string): Promise<{
@@ -85,14 +59,10 @@ async function getFanqieNovelMeta(bookId: string): Promise<{
   author: string;
 } | null> {
   try {
-    const res = await fetchApi(`https://fanqienovel.com/page/${bookId}`, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      },
-    });
+    const res = await fetchApi(`https://fanqienovel.com/page/${bookId}`);
     if (!res.ok) return null;
     const raw = await res.text();
+
     const titleMatch = raw.match(/<title>([^<]+)<\/title>/);
     let title = titleMatch
       ? titleMatch[1].replace(/完整版.*$/, '').trim()
@@ -122,17 +92,10 @@ async function getFanqieNovelMeta(bookId: string): Promise<{
 async function getFanqieChapters(
   bookId: string,
   novelPath: string,
-): Promise<(Plugin.ChapterItem & { id?: string })[]> {
+): Promise<Plugin.ChapterItem[]> {
   try {
     const res = await fetchApi(
       `https://fanqienovel.com/api/reader/directory/detail?bookId=${bookId}`,
-      {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-        },
-      },
     );
     if (!res.ok) return [];
     const json = (await res.json()) as {
@@ -147,7 +110,7 @@ async function getFanqieChapters(
     };
 
     const volumes = json?.data?.chapterListWithVolume || [];
-    const chapters: (Plugin.ChapterItem & { id?: string })[] = [];
+    const chapters: Plugin.ChapterItem[] = [];
     let order = 1;
 
     for (const vol of volumes) {
@@ -158,22 +121,22 @@ async function getFanqieChapters(
           ? parseInt(item.realChapterOrder, 10) || order++
           : order++;
         const rawTitle = item.title ? item.title.trim() : '';
-        const cleanTitle = rawTitle
-          ? rawTitle.replace(/^第\s*[0-9一二三四五六七八九十百千万]+\s*章\s*/, '')
-          : '';
+        const cleanTitle = rawTitle.replace(
+          /^第\s*[0-9一二三四五六七八九十百千万]+\s*章\s*/,
+          '',
+        );
         const name = cleanTitle
           ? `Chapter ${chNumber}: ${cleanTitle}`
           : `Chapter ${chNumber}`;
-        const date = item.firstPassTime
+        const releaseTime = item.firstPassTime
           ? new Date(parseInt(item.firstPassTime, 10) * 1000).toISOString()
-          : undefined;
+          : null;
 
         chapters.push({
           name,
-          number: chNumber,
-          date,
+          chapterNumber: chNumber,
+          releaseTime,
           path: `${novelPath}/${item.itemId}|/omniportal/chapters/content?source_id=fq&source_key=${bookId}&chapter_id=${item.itemId}&translate=en&engine=google-trans`,
-          id: item.itemId,
         });
       }
     }
@@ -189,16 +152,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
   name = 'Fiction Zone';
   icon = 'src/en/fictionzone/icon.png';
   site = 'https://fictionzone.net';
-  version = '1.0.9';
-
-  pluginSettings = {
-    accountToken: {
-      value: '',
-      label:
-        'Fiction Zone Access Token (Optional: paste your fz_access_token or cookie if you have an account or VIP subscription)',
-      type: 'Text',
-    },
-  };
+  version = '1.1.0';
 
   filters = {
     sort: {
@@ -259,7 +213,10 @@ class FictionZonePlugin implements Plugin.PluginBase {
       params.append('status', filters.status.value);
     }
 
-    if (filters?.genres?.value && filters.genres.value.length > 0) {
+    if (
+      Array.isArray(filters?.genres?.value) &&
+      filters.genres.value.length > 0
+    ) {
       filters.genres.value.forEach(g => params.append('genres', g));
     }
 
@@ -267,16 +224,10 @@ class FictionZonePlugin implements Plugin.PluginBase {
   }
 
   async getData<T>(url: string): Promise<Response<T>> {
-    const headers: [string, string][] = [
-      ['content-type', 'application/json'],
-      ['x-request-time', new Date().toISOString()],
-    ];
-
-    const token = getAuthToken();
-    if (token) {
-      headers.push(['authorization', `Bearer ${token}`]);
-    }
-
+    const cleanUrl = url.replace(
+      /^(https?:\/\/)?([^\/]+\.)?fictionzone\.net/i,
+      '',
+    );
     const res = await fetchApi(this.site + '/api/__api_party/fictionzone', {
       method: 'POST',
       headers: {
@@ -284,8 +235,11 @@ class FictionZonePlugin implements Plugin.PluginBase {
         'Accept': 'application/json',
       },
       body: JSON.stringify({
-        path: url,
-        headers,
+        path: cleanUrl,
+        headers: [
+          ['content-type', 'application/json'],
+          ['x-request-time', new Date().toISOString()],
+        ],
         method: 'GET',
       }),
     });
@@ -318,14 +272,14 @@ class FictionZonePlugin implements Plugin.PluginBase {
   ): Promise<Plugin.ChapterItem[]> {
     try {
       const data = await this.getData<{ chapters: ChapterItem[] }>(
-        '/platform/chapter-lists?novel_id=' + id,
+        `/platform/chapter-lists?novel_id=${id}`,
       );
       const chapters = data?.data?.chapters || [];
 
       return chapters.map((n, idx) => ({
         name: n.title || `Chapter ${n.chapter_number ?? idx + 1}`,
-        number: n.chapter_number ?? idx + 1,
-        date: parseDate(n.published_date),
+        chapterNumber: n.chapter_number ?? idx + 1,
+        releaseTime: parseDate(n.published_date),
         path: `${novelPath}/${n.chapter_id}|/platform/chapter-content?novel_id=${id}&chapter_id=${n.chapter_id}`,
       }));
     } catch {
@@ -335,14 +289,12 @@ class FictionZonePlugin implements Plugin.PluginBase {
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
     const novelSlug = pathToSlug(novelPath);
-    const isOmni = isOmniportal(novelSlug);
     const omniMatch = novelSlug.match(/^([a-zA-Z0-9]+)[-_]([0-9]+)$/);
     const sourceId = omniMatch ? omniMatch[1].toLowerCase() : '';
     const sourceKey = omniMatch ? omniMatch[2] : '';
 
     let novelDetails: Partial<NovelDetails> | null = null;
 
-    // 1. Try Fiction Zone's platform novel-details first
     try {
       const data = await this.getData<NovelDetails>(
         `/platform/novel-details?slug=${novelSlug}`,
@@ -351,118 +303,38 @@ class FictionZonePlugin implements Plugin.PluginBase {
         novelDetails = data.data;
       }
     } catch {
-      // Platform details not found (e.g. novel not yet in FictionZone platform database)
+      // Not indexed in Fiction Zone platform database
     }
 
-    // 2. If not found in /platform and is an omniportal novel:
-    if (!novelDetails && isOmni && omniMatch) {
-      // Try /omniportal/novels/details (works if user has token or IP has quota)
-      try {
-        const omniData = await this.getData<NovelDetails>(
-          `/omniportal/novels/details?source_id=${sourceId}&source_key=${sourceKey}&translate=en&engine=google-trans`,
-        );
-        if (omniData?.data) {
-          novelDetails = omniData.data;
-        }
-      } catch {
-        // Fall through
-      }
-
-      // If Fanqie (fq) and still no details, fetch metadata directly from Fanqie page
-      if (!novelDetails && sourceId === 'fq') {
-        const fqMeta = await getFanqieNovelMeta(sourceKey);
-        if (fqMeta) {
-          novelDetails = {
-            id: sourceKey,
-            title: fqMeta.title,
-            synopsis: fqMeta.summary,
-            image: fqMeta.cover,
-            status: 1,
-            contributors: fqMeta.author
-              ? [{ role: 'author', display_name: fqMeta.author }]
-              : [],
-          };
-        }
+    if (!novelDetails && sourceId === 'fq') {
+      const fqMeta = await getFanqieNovelMeta(sourceKey);
+      if (fqMeta) {
+        novelDetails = {
+          id: sourceKey,
+          title: fqMeta.title,
+          synopsis: fqMeta.summary,
+          image: fqMeta.cover,
+          status: 1,
+          contributors: fqMeta.author
+            ? [{ role: 'author', display_name: fqMeta.author }]
+            : [],
+        };
       }
     }
 
     if (!novelDetails) {
-      throw new Error(`Novel not found or unsupported: ${novelPath}`);
+      throw new Error(`Novel not found: ${novelPath}`);
     }
 
     const novel = novelDetails;
     let chapters: Plugin.ChapterItem[] = [];
 
-    if (!isOmni) {
-      chapters = await this.getChapterPage(novel.id || '', novelPath);
-    } else {
-      if (omniMatch) {
-        // 1. If user provided account token, try Fiction Zone's omniportal chapters endpoint
-        const token = getAuthToken();
-        if (token) {
-          try {
-            const chData = await this.getData<{ chapters: ChapterItem[] }>(
-              `/omniportal/novels/chapters?source_id=${sourceId}&source_key=${sourceKey}&translate=en&engine=google-trans`,
-            );
-            if (chData?.data?.chapters?.length) {
-              chapters = chData.data.chapters.map((n, idx) => ({
-                name: n.title || `Chapter ${n.chapter_number ?? idx + 1}`,
-                number: n.chapter_number ?? idx + 1,
-                date: parseDate(n.published_date),
-                path: `${novelPath}/${n.chapter_id}|/omniportal/chapters/content?source_id=${sourceId}&source_key=${sourceKey}&chapter_id=${n.chapter_id}&translate=en&engine=google-trans`,
-              }));
-            }
-          } catch {
-            // Fall through
-          }
-        }
+    if (sourceId === 'fq') {
+      chapters = await getFanqieChapters(sourceKey, novelPath);
+    }
 
-        // 2. If Fanqie (fq) novel, fetch directory directly (all 19-digit snowflake chapter IDs)
-        if (!chapters.length && sourceId === 'fq') {
-          chapters = await getFanqieChapters(sourceKey, novelPath);
-        }
-
-        // 3. If Faloo or Qidian, try live-chapter-lists endpoint
-        if (!chapters.length && ['faloo', 'qd', 'qidian'].includes(sourceId)) {
-          try {
-            const liveData = await this.getData<{ chapters: ChapterItem[] }>(
-              `/platform/live-chapter-lists?novel_id=0&source_id=${sourceId}&source_key=${sourceKey}&lang=en`,
-            );
-            if (liveData?.data?.chapters?.length) {
-              chapters = liveData.data.chapters.map((n, idx) => ({
-                name: n.title || `Chapter ${n.chapter_number ?? idx + 1}`,
-                number: n.chapter_number ?? idx + 1,
-                date: parseDate(n.published_date),
-                path: `${novelPath}/${n.chapter_id}|/omniportal/chapters/content?source_id=${sourceId}&source_key=${sourceKey}&chapter_id=${n.chapter_id}&translate=en&engine=google-trans`,
-              }));
-            }
-          } catch {
-            // Fall through
-          }
-        }
-      }
-
-      // 4. Try platform chapter list fallback
-      if (!chapters.length && novel.id) {
-        chapters = await this.getChapterPage(novel.id, novelPath);
-      }
-
-      // 5. Ultimate fallback if still no chapters (ensures LNReader can register novel into library)
-      if (!chapters.length) {
-        const total =
-          novel.total_chapters && novel.total_chapters > 0
-            ? novel.total_chapters
-            : 1;
-        const sourceId = omniMatch ? omniMatch[1] : '';
-        const sourceKey = omniMatch ? omniMatch[2] : '';
-        for (let i = 1; i <= total; i++) {
-          chapters.push({
-            name: `Chapter ${i}`,
-            number: i,
-            path: `${novelPath}/${i}|/omniportal/chapters/content?source_id=${sourceId}&source_key=${sourceKey}&chapter_id=${i}&translate=en&engine=google-trans`,
-          });
-        }
-      }
+    if (!chapters.length && novel.id) {
+      chapters = await this.getChapterPage(novel.id, novelPath);
     }
 
     return {
@@ -490,63 +362,26 @@ class FictionZonePlugin implements Plugin.PluginBase {
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
-    let apiPath = chapterPath.includes('|')
+    const apiPath = chapterPath.includes('|')
       ? chapterPath.split('|')[1]
       : chapterPath;
 
-    if (apiPath.startsWith('http://') || apiPath.startsWith('https://')) {
-      apiPath = apiPath.replace(/^(https?:\/\/)?([^\/]+\.)?fictionzone\.net/i, '');
+    const data = await this.getData<{ content?: string }>(apiPath);
+    const content = data?.data?.content;
+
+    if (!content) {
+      throw new Error('Chapter content is empty or unavailable.');
     }
 
-    // Auto-resolve sequential chapter indices (e.g. 1..89) for Fanqie omniportal novels to real snowflake item IDs
-    if (apiPath.includes('source_id=fq') && apiPath.includes('source_key=')) {
-      const matchKey = apiPath.match(/source_key=([0-9]+)/);
-      const matchCh = apiPath.match(/chapter_id=([0-9]+)/);
-      if (matchKey && matchCh) {
-        const chId = matchCh[1];
-        if (chId.length < 15) {
-          const idx = parseInt(chId, 10);
-          if (!isNaN(idx) && idx > 0) {
-            const fqChapters = await getFanqieChapters(matchKey[1], '');
-            if (fqChapters.length >= idx && fqChapters[idx - 1]?.id) {
-              const realItemId = fqChapters[idx - 1].id;
-              apiPath = apiPath.replace(
-                `chapter_id=${chId}`,
-                `chapter_id=${realItemId}`,
-              );
-            }
-          }
-        }
-      }
-    }
-
-    try {
-      const data = await this.getData<{ title?: string; content?: string }>(apiPath);
-      const content = data?.data?.content;
-
-      if (content) {
-        return (
-          '<p>' +
-          content
-            .split(/\r?\n+/)
-            .map(p => p.trim())
-            .filter(Boolean)
-            .join('</p><p>') +
-          '</p>'
-        );
-      }
-    } catch (err: any) {
-      if (apiPath.includes('omniportal')) {
-        return (
-          '<p><strong>Fiction Zone Chapter Unavailable</strong></p>' +
-          `<p>${err?.message || 'Failed to fetch chapter content.'}</p>` +
-          '<p>If this chapter is locked or requires a VIP subscription, you can set your Fiction Zone access token in the extension settings.</p>'
-        );
-      }
-      throw err;
-    }
-
-    throw new Error('Chapter content is empty or locked.');
+    return (
+      '<p>' +
+      content
+        .split(/\r?\n+/)
+        .map(p => p.trim())
+        .filter(Boolean)
+        .join('</p><p>') +
+      '</p>'
+    );
   }
 
   async searchNovels(
@@ -555,7 +390,6 @@ class FictionZonePlugin implements Plugin.PluginBase {
   ): Promise<Plugin.NovelItem[]> {
     const cleanTerm = searchTerm.trim();
 
-    // If searching by URL, path, or novel slug/id on page 1
     if (pageNo === 1) {
       const isUrlOrId =
         cleanTerm.includes('fictionzone.net') ||
@@ -567,18 +401,19 @@ class FictionZonePlugin implements Plugin.PluginBase {
       if (isUrlOrId) {
         try {
           const novelSlug = pathToSlug(cleanTerm);
-          const novel = await this.parseNovel(formatNovelPath(novelSlug));
+          const path = formatNovelPath(novelSlug);
+          const novel = await this.parseNovel(path);
           if (novel) {
             return [
               {
                 name: novel.name,
                 cover: novel.cover,
-                path: formatNovelPath(novelSlug),
+                path,
               },
             ];
           }
         } catch {
-          // If direct novel lookup fails, fall through to catalog browse search
+          // Fall through to catalog search
         }
       }
     }
@@ -595,12 +430,12 @@ class FictionZonePlugin implements Plugin.PluginBase {
     return await this.getPage(`/platform/browse?${params.toString()}`);
   }
 
-  resolveUrl = (path: string, isNovel?: boolean) => {
+  resolveUrl = (path: string): string => {
     let clean = path.split('|')[0].trim();
     clean = clean.replace(/^(https?:\/\/)?([^\/]+\.)?fictionzone\.net\/?/i, '');
     clean = clean.replace(/^\/+/, '');
     clean = clean.replace(
-      /^omniportal\/([a-zA-Z0-9]+)[-\s]+([0-9]+)(.*)$/,
+      /^omniportal\/([a-zA-Z0-9]+)[-\s]+([0-9]+)(.*)$/i,
       'omniportal/$1/$2$3',
     );
     return `${this.site}/${clean}`;
@@ -635,7 +470,6 @@ type NovelDetails = {
   genres?: { name: string }[];
   tags?: { name: string }[];
   status: number;
-  total_chapters?: number;
   contributors?: { role: string; display_name: string }[];
   synopsis?: string;
 };
