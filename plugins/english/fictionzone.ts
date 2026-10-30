@@ -41,10 +41,16 @@ function formatNovelPath(slug: string): string {
 }
 
 function pathToSlug(novelPath: string): string {
-  const clean = novelPath.trim().replace(/^\/?(omniportal|novel)\//, '');
-  const match = clean.match(/^([a-zA-Z0-9]+)[\/\-\s]+([0-9]+)$/);
-  if (match) {
-    return `${match[1]}-${match[2]}`;
+  let clean = decodeURIComponent(novelPath.trim());
+  clean = clean.replace(/^(https?:\/\/)?([^\/]+\.)?fictionzone\.net\/?/i, '');
+  clean = clean.replace(/^\/+/, '');
+  clean = clean.split('?')[0].split('#')[0];
+  clean = clean.replace(/\/+$/, '');
+  clean = clean.replace(/^(omniportal|novel)\//i, '');
+
+  const omniMatch = clean.match(/^([a-zA-Z0-9]+)[\/\-\s]+([0-9]+)$/);
+  if (omniMatch) {
+    return `${omniMatch[1]}-${omniMatch[2]}`;
   }
   return clean;
 }
@@ -54,7 +60,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
   name = 'Fiction Zone';
   icon = 'src/en/fictionzone/icon.png';
   site = 'https://fictionzone.net';
-  version = '1.0.4';
+  version = '1.0.5';
 
   filters = {
     sort: {
@@ -165,17 +171,21 @@ class FictionZonePlugin implements Plugin.PluginBase {
     id: string,
     novelPath: string,
   ): Promise<Plugin.ChapterItem[]> {
-    const data = await this.getData<{ chapters: ChapterItem[] }>(
-      '/platform/chapter-lists?novel_id=' + id,
-    );
-    const chapters = data?.data?.chapters || [];
+    try {
+      const data = await this.getData<{ chapters: ChapterItem[] }>(
+        '/platform/chapter-lists?novel_id=' + id,
+      );
+      const chapters = data?.data?.chapters || [];
 
-    return chapters.map((n, idx) => ({
-      name: n.title || `Chapter ${n.chapter_number ?? idx + 1}`,
-      number: n.chapter_number ?? idx + 1,
-      date: parseDate(n.published_date),
-      path: `${novelPath}/${n.chapter_id}|/platform/chapter-content?novel_id=${id}&chapter_id=${n.chapter_id}`,
-    }));
+      return chapters.map((n, idx) => ({
+        name: n.title || `Chapter ${n.chapter_number ?? idx + 1}`,
+        number: n.chapter_number ?? idx + 1,
+        date: parseDate(n.published_date),
+        path: `${novelPath}/${n.chapter_id}|/platform/chapter-content?novel_id=${id}&chapter_id=${n.chapter_id}`,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
@@ -184,9 +194,10 @@ class FictionZonePlugin implements Plugin.PluginBase {
       `/platform/novel-details?slug=${novelSlug}`,
     );
     const novel = data.data;
+    const canonicalPath = formatNovelPath(novelSlug);
 
     return {
-      path: novelPath,
+      path: canonicalPath,
       name: novel.title,
       cover: decodeCover(novel.image),
       genres: [
@@ -205,14 +216,19 @@ class FictionZonePlugin implements Plugin.PluginBase {
         (novel.contributors || []).find(c => c.role === 'author')
           ?.display_name || '',
       summary: novel.synopsis || '',
-      chapters: await this.getChapterPage(novel.id, novelPath),
+      chapters: await this.getChapterPage(novel.id, canonicalPath),
     };
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
-    const apiPath = chapterPath.includes('|')
+    let apiPath = chapterPath.includes('|')
       ? chapterPath.split('|')[1]
       : chapterPath;
+
+    if (apiPath.startsWith('http://') || apiPath.startsWith('https://')) {
+      apiPath = apiPath.replace(/^(https?:\/\/)?([^\/]+\.)?fictionzone\.net/i, '');
+    }
+
     const data = await this.getData<{ content?: string }>(apiPath);
     const content = data?.data?.content;
 
@@ -251,7 +267,9 @@ class FictionZonePlugin implements Plugin.PluginBase {
   }
 
   resolveUrl = (path: string, isNovel?: boolean) => {
-    let clean = path.split('|')[0].trim().replace(/^\//, '');
+    let clean = path.split('|')[0].trim();
+    clean = clean.replace(/^(https?:\/\/)?([^\/]+\.)?fictionzone\.net\/?/i, '');
+    clean = clean.replace(/^\/+/, '');
     clean = clean.replace(
       /^omniportal\/([a-zA-Z0-9]+)[-\s]+([0-9]+)(.*)$/,
       'omniportal/$1/$2$3',
