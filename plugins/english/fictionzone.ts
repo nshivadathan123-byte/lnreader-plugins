@@ -139,7 +139,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
     return novels.map(n => ({
       name: n.title,
       cover: decodeCover(n.image),
-      path: `novel/${n.slug}`,
+      path: `omniportal/${n.slug}`,
     }));
   }
 
@@ -161,7 +161,7 @@ class FictionZonePlugin implements Plugin.PluginBase {
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    const novelSlug = novelPath.replace(/^\/?novel\//, '');
+    const novelSlug = novelPath.replace(/^\/?(novel|omniportal)\//, '');
     const data = await this.getData<NovelDetails>(
       `/platform/novel-details?slug=${novelSlug}`,
     );
